@@ -3,13 +3,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.passwords import verify_password
-from app.auth.tokens import create_access_token
+from app.auth.tokens import (
+    create_access_token,
+    create_refresh_token,
+    get_refresh_token_expiry,
+)
 from app.db.session import get_db
 from app.schemas.user import (
-    AccessTokenResponse,
+    RefreshTokenRequest,
+    TokenPairResponse,
     UserLogin,
     UserRegister,
     UserResponse,
+)
+from app.services.refresh_tokens import (
+    get_valid_refresh_token,
+    store_refresh_token,
 )
 from app.services.users import create_user, get_user_by_email
 
@@ -62,7 +71,7 @@ async def register(
 
 @router.post(
     "/login",
-    response_model=AccessTokenResponse,
+    response_model=TokenPairResponse,
 )
 async def login(
     payload: UserLogin,
@@ -98,6 +107,45 @@ async def login(
 
     access_token = create_access_token(user.id)
 
-    return AccessTokenResponse(
+    refresh_token = create_refresh_token()
+
+    await store_refresh_token(
+        db=db,
+        user_id=user.id,
+        token=refresh_token,
+        expires_at=get_refresh_token_expiry(),
+    )
+
+    return TokenPairResponse(
         access_token=access_token,
+        refresh_token=refresh_token,
+    )
+
+
+@router.post(
+    "/refresh",
+    response_model=TokenPairResponse,
+)
+async def refresh(
+    payload: RefreshTokenRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    stored_refresh_token = await get_valid_refresh_token(
+        db,
+        payload.refresh_token,
+    )
+
+    if stored_refresh_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+        )
+
+    access_token = create_access_token(
+        stored_refresh_token.user_id
+    )
+
+    return TokenPairResponse(
+        access_token=access_token,
+        refresh_token=payload.refresh_token,
     )

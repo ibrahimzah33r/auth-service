@@ -1,3 +1,5 @@
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -38,3 +40,19 @@ def decode_access_token(token: str) -> dict:
         raise jwt.InvalidTokenError("Invalid token type")
 
     return payload
+
+
+def create_refresh_token() -> str:
+    return secrets.token_urlsafe(48)
+
+
+def hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(
+        token.encode("utf-8")
+    ).hexdigest()
+
+
+def get_refresh_token_expiry() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(
+        days=settings.refresh_token_expire_days
+    )
