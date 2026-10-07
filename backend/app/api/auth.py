@@ -17,7 +17,10 @@ from app.schemas.user import (
     UserResponse,
 )
 from app.services.refresh_tokens import (
-    get_valid_refresh_token,
+    get_refresh_token,
+    mark_refresh_token_used,
+    refresh_token_is_expired,
+    revoke_token_family,
     store_refresh_token,
 )
 from app.services.users import create_user, get_user_by_email
@@ -106,7 +109,6 @@ async def login(
         )
 
     access_token = create_access_token(user.id)
-
     refresh_token = create_refresh_token()
 
     await store_refresh_token(
@@ -130,22 +132,56 @@ async def refresh(
     payload: RefreshTokenRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    stored_refresh_token = await get_valid_refresh_token(
+    stored_token = await get_refresh_token(
         db,
         payload.refresh_token,
     )
 
-    if stored_refresh_token is None:
+    if stored_token is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired refresh token",
+            detail="Invalid refresh token",
         )
 
-    access_token = create_access_token(
-        stored_refresh_token.user_id
+    if refresh_token_is_expired(stored_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token expired",
+        )
+
+    if stored_token.revoked:
+        await revoke_token_family(
+            db,
+            stored_token.family_id,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token reuse detected",
+        )
+
+    await mark_refresh_token_used(
+        db,
+        stored_token,
     )
+
+    new_refresh_token = create_refresh_token()
+
+    await store_refresh_token(
+        db=db,
+        user_id=stored_token.user_id,
+        token=new_refresh_token,
+        expires_at=get_refresh_token_expiry(),
+        family_id=stored_token.family_id,
+    )
+
+    access_token = create_access_token(
+        stored_token.user_id
+    )
+
+    await db.commit()
 
     return TokenPairResponse(
         access_token=access_token,
-        refresh_token=payload.refresh_token,
+        refresh_token=new_refresh_token,
     )
