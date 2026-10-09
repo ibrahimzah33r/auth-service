@@ -76,3 +76,19 @@ async def revoke_token_family(
     )
 
     await db.commit()
+
+
+async def revoke_user_tokens(
+    db: AsyncSession,
+    user_id: UUID,
+) -> None:
+    await db.execute(
+        update(RefreshToken)
+        .where(
+            RefreshToken.user_id == user_id,
+            RefreshToken.revoked.is_(False),
+        )
+        .values(revoked=True)
+    )
+
+    await db.commit()

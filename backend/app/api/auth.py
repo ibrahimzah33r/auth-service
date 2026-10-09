@@ -10,6 +10,7 @@ from app.auth.tokens import (
 )
 from app.db.session import get_db
 from app.schemas.user import (
+    LogoutResponse,
     RefreshTokenRequest,
     TokenPairResponse,
     UserLogin,
@@ -21,6 +22,7 @@ from app.services.refresh_tokens import (
     mark_refresh_token_used,
     refresh_token_is_expired,
     revoke_token_family,
+    revoke_user_tokens,
     store_refresh_token,
 )
 from app.services.users import create_user, get_user_by_email
@@ -184,4 +186,57 @@ async def refresh(
     return TokenPairResponse(
         access_token=access_token,
         refresh_token=new_refresh_token,
+    )
+
+
+@router.post(
+    "/logout",
+    response_model=LogoutResponse,
+)
+async def logout(
+    payload: RefreshTokenRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    stored_token = await get_refresh_token(
+        db,
+        payload.refresh_token,
+    )
+
+    if stored_token is not None:
+        await revoke_token_family(
+            db,
+            stored_token.family_id,
+        )
+
+    return LogoutResponse(
+        message="Logged out",
+    )
+
+
+@router.post(
+    "/logout-all",
+    response_model=LogoutResponse,
+)
+async def logout_all(
+    payload: RefreshTokenRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    stored_token = await get_refresh_token(
+        db,
+        payload.refresh_token,
+    )
+
+    if stored_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+        )
+
+    await revoke_user_tokens(
+        db,
+        stored_token.user_id,
+    )
+
+    return LogoutResponse(
+        message="Logged out from all sessions",
     )

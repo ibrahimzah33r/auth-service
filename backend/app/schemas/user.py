@@ -34,3 +34,7 @@ class TokenPairResponse(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
+
+
+class LogoutResponse(BaseModel):
+    message: str
