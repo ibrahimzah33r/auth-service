@@ -26,7 +26,8 @@ from app.services.refresh_tokens import (
     store_refresh_token,
 )
 from app.services.users import create_user, get_user_by_email
-
+from app.auth.dependencies import get_current_user
+from app.models.user import User
 
 router = APIRouter(
     prefix="/auth",
@@ -240,3 +241,12 @@ async def logout_all(
     return LogoutResponse(
         message="Logged out from all sessions",
     )
+
+@router.get(
+    "/me",
+    response_model=UserResponse,
+)
+async def me(
+    current_user: User = Depends(get_current_user),
+):
+    return current_user
