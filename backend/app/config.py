@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     environment: str = "development"
 
     database_url: str
+    redis_url: str = "redis://localhost:6379/0"
 
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
@@ -19,6 +20,12 @@ class Settings(BaseSettings):
     refresh_cookie_name: str = "refresh_token"
     refresh_cookie_secure: bool = False
     refresh_cookie_samesite: str = "lax"
+
+    login_ip_limit: int = 10
+    login_ip_window_seconds: int = 60
+
+    login_account_limit: int = 5
+    login_account_window_seconds: int = 300
 
     model_config = SettingsConfigDict(
         env_file=".env",

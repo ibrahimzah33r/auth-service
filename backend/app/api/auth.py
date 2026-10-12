@@ -1,8 +1,15 @@
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import (
+    APIRouter,
+    Cookie,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.auth.passwords import verify_password
+from app.services.authentication import authenticate_user
 from app.auth.tokens import (
     create_access_token,
     create_refresh_token,
@@ -34,6 +41,10 @@ from app.auth.cookies import (
     set_refresh_cookie,
 )
 from app.config import settings
+from app.services.rate_limit import (
+    check_login_account_limit,
+    check_login_ip_limit,
+)
 
 router = APIRouter(
     prefix="/auth",
@@ -87,35 +98,30 @@ async def register(
 )
 async def login(
     payload: UserLogin,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     normalized_email = payload.email.lower()
 
-    user = await get_user_by_email(
-        db,
-        normalized_email,
+    client_ip = (
+        request.client.host
+        if request.client is not None
+        else "unknown"
     )
 
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
+    await check_login_ip_limit(
+        client_ip
+    )
 
-    if not verify_password(
-        payload.password,
-        user.password_hash,
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
+    await check_login_account_limit(
+        normalized_email
+    )
 
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive",
-        )
+    user = await authenticate_user(
+        db=db,
+        email=normalized_email,
+        password=payload.password,
+    )
 
     access_token = create_access_token(user.id)
     refresh_token = create_refresh_token()
@@ -138,36 +144,31 @@ async def login(
 )
 async def browser_login(
     payload: UserLogin,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     normalized_email = payload.email.lower()
 
-    user = await get_user_by_email(
-        db,
-        normalized_email,
+    client_ip = (
+        request.client.host
+        if request.client is not None
+        else "unknown"
     )
 
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
+    await check_login_ip_limit(
+        client_ip
+    )
 
-    if not verify_password(
-        payload.password,
-        user.password_hash,
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
+    await check_login_account_limit(
+        normalized_email
+    )
 
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive",
-        )
+    user = await authenticate_user(
+        db=db,
+        email=normalized_email,
+        password=payload.password,
+    )
 
     access_token = create_access_token(user.id)
     refresh_token = create_refresh_token()
@@ -188,7 +189,7 @@ async def browser_login(
         access_token=access_token,
     )
 
-
+    
 @router.post(
     "/refresh",
     response_model=TokenPairResponse,
