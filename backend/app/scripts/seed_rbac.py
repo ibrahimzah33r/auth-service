@@ -21,6 +21,7 @@ ROLE_PERMISSIONS = {
         ("users", "read"),
         ("users", "write"),
         ("users", "delete"),
+        ("audit", "read"),
     },
 }
 

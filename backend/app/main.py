@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app.api.audit import router as audit_router
 from app.api.auth import router as auth_router
 from app.api.protected import router as protected_router
 from app.config import settings
@@ -32,6 +33,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(protected_router)
+app.include_router(audit_router)
 
 
 @app.get("/health")

@@ -9,21 +9,34 @@ from fastapi import (
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.services.authentication import authenticate_user
+
+from app.auth.cookies import (
+    clear_refresh_cookie,
+    set_refresh_cookie,
+)
+from app.auth.dependencies import get_current_user
 from app.auth.tokens import (
     create_access_token,
     create_refresh_token,
     get_refresh_token_expiry,
 )
+from app.config import settings
 from app.db.session import get_db
+from app.models.user import User
 from app.schemas.user import (
+    AccessTokenResponse,
     LogoutResponse,
     RefreshTokenRequest,
     TokenPairResponse,
     UserLogin,
     UserRegister,
     UserResponse,
-    AccessTokenResponse,
+)
+from app.services.audit import write_audit_event
+from app.services.authentication import authenticate_user
+from app.services.rate_limit import (
+    check_login_account_limit,
+    check_login_ip_limit,
 )
 from app.services.refresh_tokens import (
     get_refresh_token,
@@ -33,23 +46,23 @@ from app.services.refresh_tokens import (
     revoke_user_tokens,
     store_refresh_token,
 )
-from app.services.users import create_user, get_user_by_email
-from app.auth.dependencies import get_current_user
-from app.models.user import User
-from app.auth.cookies import (
-    clear_refresh_cookie,
-    set_refresh_cookie,
+from app.services.users import (
+    create_user,
+    get_user_by_email,
 )
-from app.config import settings
-from app.services.rate_limit import (
-    check_login_account_limit,
-    check_login_ip_limit,
-)
+
 
 router = APIRouter(
     prefix="/auth",
     tags=["auth"],
 )
+
+
+def get_client_ip(request: Request) -> str:
+    if request.client is None:
+        return "unknown"
+
+    return request.client.host
 
 
 @router.post(
@@ -102,12 +115,7 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ):
     normalized_email = payload.email.lower()
-
-    client_ip = (
-        request.client.host
-        if request.client is not None
-        else "unknown"
-    )
+    client_ip = get_client_ip(request)
 
     await check_login_ip_limit(
         client_ip
@@ -121,9 +129,13 @@ async def login(
         db=db,
         email=normalized_email,
         password=payload.password,
+        client_ip=client_ip,
     )
 
-    access_token = create_access_token(user.id)
+    access_token = create_access_token(
+        user.id
+    )
+
     refresh_token = create_refresh_token()
 
     await store_refresh_token(
@@ -138,6 +150,7 @@ async def login(
         refresh_token=refresh_token,
     )
 
+
 @router.post(
     "/login/browser",
     response_model=AccessTokenResponse,
@@ -149,12 +162,7 @@ async def browser_login(
     db: AsyncSession = Depends(get_db),
 ):
     normalized_email = payload.email.lower()
-
-    client_ip = (
-        request.client.host
-        if request.client is not None
-        else "unknown"
-    )
+    client_ip = get_client_ip(request)
 
     await check_login_ip_limit(
         client_ip
@@ -168,9 +176,13 @@ async def browser_login(
         db=db,
         email=normalized_email,
         password=payload.password,
+        client_ip=client_ip,
     )
 
-    access_token = create_access_token(user.id)
+    access_token = create_access_token(
+        user.id
+    )
+
     refresh_token = create_refresh_token()
 
     await store_refresh_token(
@@ -189,15 +201,18 @@ async def browser_login(
         access_token=access_token,
     )
 
-    
+
 @router.post(
     "/refresh",
     response_model=TokenPairResponse,
 )
 async def refresh(
     payload: RefreshTokenRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    client_ip = get_client_ip(request)
+
     stored_token = await get_refresh_token(
         db,
         payload.refresh_token,
@@ -209,7 +224,9 @@ async def refresh(
             detail="Invalid refresh token",
         )
 
-    if refresh_token_is_expired(stored_token):
+    if refresh_token_is_expired(
+        stored_token
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token expired",
@@ -220,6 +237,17 @@ async def refresh(
             db,
             stored_token.family_id,
         )
+
+        await write_audit_event(
+            db=db,
+            event_type="refresh_token_reuse",
+            outcome="denied",
+            user_id=stored_token.user_id,
+            client_ip=client_ip,
+            detail="Revoked refresh token replayed",
+        )
+
+        await db.commit()
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -245,6 +273,14 @@ async def refresh(
         stored_token.user_id
     )
 
+    await write_audit_event(
+        db=db,
+        event_type="token_refresh",
+        outcome="success",
+        user_id=stored_token.user_id,
+        client_ip=client_ip,
+    )
+
     await db.commit()
 
     return TokenPairResponse(
@@ -252,11 +288,13 @@ async def refresh(
         refresh_token=new_refresh_token,
     )
 
+
 @router.post(
     "/refresh/browser",
     response_model=AccessTokenResponse,
 )
 async def browser_refresh(
+    request: Request,
     response: Response,
     refresh_token: str | None = Cookie(
         default=None,
@@ -264,6 +302,8 @@ async def browser_refresh(
     ),
     db: AsyncSession = Depends(get_db),
 ):
+    client_ip = get_client_ip(request)
+
     if refresh_token is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -276,15 +316,21 @@ async def browser_refresh(
     )
 
     if stored_token is None:
-        clear_refresh_cookie(response)
+        clear_refresh_cookie(
+            response
+        )
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token",
         )
 
-    if refresh_token_is_expired(stored_token):
-        clear_refresh_cookie(response)
+    if refresh_token_is_expired(
+        stored_token
+    ):
+        clear_refresh_cookie(
+            response
+        )
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -297,7 +343,20 @@ async def browser_refresh(
             stored_token.family_id,
         )
 
-        clear_refresh_cookie(response)
+        await write_audit_event(
+            db=db,
+            event_type="refresh_token_reuse",
+            outcome="denied",
+            user_id=stored_token.user_id,
+            client_ip=client_ip,
+            detail="Revoked refresh token replayed",
+        )
+
+        await db.commit()
+
+        clear_refresh_cookie(
+            response
+        )
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -328,9 +387,20 @@ async def browser_refresh(
         new_refresh_token,
     )
 
+    await write_audit_event(
+        db=db,
+        event_type="token_refresh",
+        outcome="success",
+        user_id=stored_token.user_id,
+        client_ip=client_ip,
+    )
+
+    await db.commit()
+
     return AccessTokenResponse(
         access_token=access_token,
     )
+
 
 @router.post(
     "/logout",
@@ -338,8 +408,11 @@ async def browser_refresh(
 )
 async def logout(
     payload: RefreshTokenRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    client_ip = get_client_ip(request)
+
     stored_token = await get_refresh_token(
         db,
         payload.refresh_token,
@@ -351,15 +424,27 @@ async def logout(
             stored_token.family_id,
         )
 
+        await write_audit_event(
+            db=db,
+            event_type="logout",
+            outcome="success",
+            user_id=stored_token.user_id,
+            client_ip=client_ip,
+        )
+
+        await db.commit()
+
     return LogoutResponse(
         message="Logged out",
     )
+
 
 @router.post(
     "/logout/browser",
     response_model=LogoutResponse,
 )
 async def browser_logout(
+    request: Request,
     response: Response,
     refresh_token: str | None = Cookie(
         default=None,
@@ -367,6 +452,8 @@ async def browser_logout(
     ),
     db: AsyncSession = Depends(get_db),
 ):
+    client_ip = get_client_ip(request)
+
     if refresh_token is not None:
         stored_token = await get_refresh_token(
             db,
@@ -379,11 +466,24 @@ async def browser_logout(
                 stored_token.family_id,
             )
 
-    clear_refresh_cookie(response)
+            await write_audit_event(
+                db=db,
+                event_type="logout",
+                outcome="success",
+                user_id=stored_token.user_id,
+                client_ip=client_ip,
+            )
+
+            await db.commit()
+
+    clear_refresh_cookie(
+        response
+    )
 
     return LogoutResponse(
         message="Logged out",
     )
+
 
 @router.post(
     "/logout-all",
@@ -391,8 +491,11 @@ async def browser_logout(
 )
 async def logout_all(
     payload: RefreshTokenRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    client_ip = get_client_ip(request)
+
     stored_token = await get_refresh_token(
         db,
         payload.refresh_token,
@@ -409,15 +512,28 @@ async def logout_all(
         stored_token.user_id,
     )
 
+    await write_audit_event(
+        db=db,
+        event_type="logout_all",
+        outcome="success",
+        user_id=stored_token.user_id,
+        client_ip=client_ip,
+    )
+
+    await db.commit()
+
     return LogoutResponse(
         message="Logged out from all sessions",
     )
+
 
 @router.get(
     "/me",
     response_model=UserResponse,
 )
 async def me(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        get_current_user
+    ),
 ):
     return current_user

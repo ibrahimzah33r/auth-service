@@ -10,7 +10,7 @@ from app.auth.tokens import decode_access_token
 from app.db.session import get_db
 from app.models.user import User
 from app.services.rbac import get_user_permissions
-
+from app.services.audit import write_audit_event
 
 bearer_scheme = HTTPBearer(
     auto_error=False,
@@ -84,6 +84,16 @@ def require_permission(
         )
 
         if permission not in permissions:
+            await write_audit_event(
+                db=db,
+                event_type="authorization",
+                outcome="denied",
+                user_id=current_user.id,
+                detail=f"Missing permission: {permission}",
+            )
+
+            await db.commit()
+
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Missing permission: {permission}",
